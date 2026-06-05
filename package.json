@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "dayjs": "^1.11.19",
+    "dayjs-plugin-utc": "^0.1.2",
+    "express": "^5.2.1",
+    "tosource": "^2.0.0-alpha.3"
+  }
+}
