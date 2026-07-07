@@ -24,6 +24,13 @@ const program = "/opt/local/bin/rigctl";
 const N1MM_Addr = "10.0.1.255";
 const N1MM_Port = 5555;
 
+// one shared UDP socket, bound at startup so the broadcast flag is
+// already set when the first QSO arrives
+const udpSocket = dgram.createSocket("udp4");
+udpSocket.bind(function() {
+	udpSocket.setBroadcast(true);
+});
+
 const timer = ms => new Promise(res => setTimeout(res, ms));
 
 const BW = {
@@ -92,40 +99,46 @@ function makeAdifData(qso) {
 	return adif;
 }
 
+// runs rigctl and resolves with { ok, resp, err } - never rejects, so
+// callers can't crash the server by forgetting a catch
 function callRigCtrl(cmd) {
-	var resp = "";
-	cmd = cmd.trim();
-	var args = "-m " + radio + " -r " + device + " -s " + serialSpeed + " " + cmd;
-	// console.log('ARGS: ' + args);
-	args = args.trim();
+	return new Promise(function(resolve) {
+		var resp = "";
+		var errOut = "";
+		cmd = cmd.trim();
+		var args = "-m " + radio + " -r " + device + " -s " + serialSpeed + " " + cmd;
+		// console.log('ARGS: ' + args);
+		args = args.trim().split(" ");
 
-	args = args.split(" ");
+		var child = spawn(program, args);
 
-	child = spawn(program, args);
+		child.on("error", function(e) {
+			console.log("rigctl spawn error: " + e);
+			resolve({ ok: false, resp: "", err: String(e) });
+		});
 
-	child.on("error", function(e) {
-		console.log("rigctl spawn error: " + e);
-	});
+		child.stdout.on("data", function(data) {
+			resp = resp + data.toString("utf8");
+		});
 
-	child.stdout.on("data", function(data) {
-		data = data.toString("utf8");
-		resp = resp + data;
-	});
+		child.stderr.on("data", function(data) {
+			errOut = errOut + data.toString("utf8");
+		});
 
-	child.stderr.on("data", function(data) {
-		// console.log(data.toString("utf8"));
-	});
-
-	child.on("close", function() {
-		resp = resp.replace("\r", " ").replace("\n", " ").replace("  ", " ").trim();
-		// console.log("RESP: " + resp);
+		child.on("close", function(code) {
+			resp = resp.replace("\r", " ").replace("\n", " ").replace("  ", " ").trim();
+			if (code !== 0) {
+				console.log("rigctl failed (exit " + code + "): " + errOut.trim());
+			}
+			resolve({ ok: code === 0, resp: resp, err: errOut.trim() });
+		});
 	});
 }
 
 // use OmniRig syntax to control rig:
 // # http://localhost:8073/omnirig/qsy?freq=7200000&mode=LSB
 
-app.get('/omnirig/qsy', function(req, res) {
+app.get('/omnirig/qsy', async function(req, res) {
 	console.log("OMNIRIG (QSY) - Received: " + toSource(req.query));
 	var freq = parseInt(req.query.freq, 10);
 	var mode = (req.query.mode || "").toUpperCase();
@@ -140,8 +153,12 @@ app.get('/omnirig/qsy', function(req, res) {
 	// console.log("Found QSY: " + freq + " " + mode);
 	// set frequency and mode in a single rigctl call - two concurrent
 	// rigctl processes collide on the serial port
-	callRigCtrl("F " + freq + " M " + mode + " " + bw);
-	res.send("OK");
+	var result = await callRigCtrl("F " + freq + " M " + mode + " " + bw);
+	if (result.ok) {
+		res.send("OK");
+	} else {
+		res.status(500).send("rigctl failed: " + result.err);
+	}
 });
 
 
@@ -214,14 +231,11 @@ app.get('/log4om/log', function(req, res) {
         // a program runs, then file handle will be closed
         log.end();
 
-		// var dgram = require("dgram");
-		var socket = dgram.createSocket("udp4");
-		socket.bind(function() {
-			socket.setBroadcast(true);
-		});
-		var message = new Buffer.from(msg);
-		socket.send(message, 0, message.length, N1MM_Port, N1MM_Addr, function(err, bytes) {
-			socket.close();
+		var message = Buffer.from(msg);
+		udpSocket.send(message, 0, message.length, N1MM_Port, N1MM_Addr, function(err, bytes) {
+			if (err) {
+				console.log("UDP send error: " + err);
+			}
 		});
 		res.send("OK");
 	}
