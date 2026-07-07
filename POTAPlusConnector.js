@@ -127,17 +127,20 @@ function callRigCtrl(cmd) {
 
 app.get('/omnirig/qsy', function(req, res) {
 	console.log("OMNIRIG (QSY) - Received: " + toSource(req.query));
-	var freq = req.query.freq;
-	var mode = req.query.mode;
+	var freq = parseInt(req.query.freq, 10);
+	var mode = (req.query.mode || "").toUpperCase();
 
-	if (freq == 0 || mode == null) {
-		console.log("Received NULL data");
+	if (!freq || freq <= 0 || mode === "") {
+		console.log("QSY: invalid freq or mode");
+		res.status(400).send("Invalid or missing freq/mode");
 		return;
 	}
+	// modes not in the BW table use passband 0 = rig default
+	var bw = BW[mode] || "0";
 	// console.log("Found QSY: " + freq + " " + mode);
 	// set frequency and mode in a single rigctl call - two concurrent
 	// rigctl processes collide on the serial port
-	callRigCtrl("F " + freq + " M " + mode.toUpperCase() + " " + BW[mode.toUpperCase()]);
+	callRigCtrl("F " + freq + " M " + mode + " " + bw);
 	res.send("OK");
 });
 
@@ -148,10 +151,18 @@ app.get('/omnirig/qsy', function(req, res) {
 app.get('/log4om/log', function(req, res) {
 	console.log("Log4OM (logging) - Received: " + toSource(req.query));
 
-	var addData = JSON.parse(req.query.APP_L4ONG_QSO_AWARD_REFERENCES);
-	var potaRef = addData[0]["R"];
-	var regionRaw = addData[0]["G"];
-	var state = regionRaw.split(',')[0].split('-')[1];
+	// the POTA award reference is optional - a QSO without one (or with a
+	// malformed one) is still logged, just without park/state info
+	var potaRef;
+	var state;
+	try {
+		var addData = JSON.parse(req.query.APP_L4ONG_QSO_AWARD_REFERENCES);
+		potaRef = addData[0]["R"];
+		var regionRaw = addData[0]["G"];
+		state = regionRaw.split(',')[0].split('-')[1];
+	} catch (e) {
+		console.log("No usable POTA award reference, logging without park info (" + e + ")");
+	}
 
 	var qso = {
 		"call": req.query.CALL,
@@ -162,16 +173,17 @@ app.get('/log4om/log', function(req, res) {
 		"rst_sent": req.query.RST_SENT,
 		"rst_rcvd": req.query.RST_RCVD,
 		"state": state,
-		"qth": addData[0]["R"],
+		"qth": potaRef,
 		"comment": req.query.COMMENT,
 		"tx_pwr": req.query.TX_PWR,
-		"sig_info": addData[0]["R"]
+		"sig_info": potaRef
 	};
 
 	// is this element already in the buffer? 
 	console.log("BUFFER: " + toSource(dupeBuffer));
 	if (isInBuffer(dupeBuffer, qso)) {
 		console.log("ignoring DUPE");
+		res.send("DUPE");
 	} else {
 		// insert the new entry in the buffer 
 		insertIntoBuffer(dupeBuffer, qso);
@@ -211,6 +223,7 @@ app.get('/log4om/log', function(req, res) {
 		socket.send(message, 0, message.length, N1MM_Port, N1MM_Addr, function(err, bytes) {
 			socket.close();
 		});
+		res.send("OK");
 	}
 });
 
