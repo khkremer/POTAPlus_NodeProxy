@@ -1,6 +1,3 @@
-// just for debugging:
-const toSource = require('tosource');
-
 const express = require('express');
 const {
 	spawn
@@ -10,19 +7,22 @@ const dgram = require("dgram");
 
 var fs = require('fs');
 
+// all site-specific settings live in config.json
+const config = require('./config.json');
 
-const logFileName = "./adif.log";
+const logFileName = config.logFileName;
 
 // for rigctl
-const port = 8073;
-const radio = "2045"; // Elecraft KX3
-const device = "/dev/cu.usbserial-A907UQ6P"; // KX3 serial port
-const serialSpeed = "38400"; // must match the KX3 MENU:RS232 setting
-const program = "/opt/local/bin/rigctl";
+const port = config.port;
+const bindAddr = config.bindAddr; // "0.0.0.0" = all interfaces, "127.0.0.1" = local only
+const radio = config.radio; // hamlib model number, 2045 = Elecraft KX3
+const device = config.device; // serial port (or host:port for rigctld)
+const serialSpeed = config.serialSpeed; // must match the KX3 MENU:RS232 setting
+const program = config.rigctlPath;
 
 // for RUMlogNG
-const N1MM_Addr = "10.0.1.255";
-const N1MM_Port = 5555;
+const N1MM_Addr = config.N1MM_Addr;
+const N1MM_Port = config.N1MM_Port;
 
 // one shared UDP socket, bound at startup so the broadcast flag is
 // already set when the first QSO arrives
@@ -30,8 +30,6 @@ const udpSocket = dgram.createSocket("udp4");
 udpSocket.bind(function() {
 	udpSocket.setBroadcast(true);
 });
-
-const timer = ms => new Promise(res => setTimeout(res, ms));
 
 const BW = {
 	'CW': "300",
@@ -81,19 +79,14 @@ function isInBuffer(buffer, elem) {
 
 function makeAdifData(qso) {
 	var adif = "";
-	for (k in qso) {
-		var newTag = "";
-		try {
-			// get the associated value
-			// console.log("ADIF: Creating data for " + k);
-			var v = qso[k];
-			newTag = "<" + k + ":" + v.length + ">" + v;
-		} catch (e) {
-			console.log("ADIF: Error for tag " + k + " - " + e);
+	for (const k in qso) {
+		var v = qso[k];
+		// fields without a value (e.g. no POTA ref, no comment) are skipped
+		if (v == null || v === "") {
+			continue;
 		}
-		if (newTag.length > 0) {
-			adif = adif + newTag + " ";
-		}
+		v = String(v);
+		adif = adif + "<" + k + ":" + v.length + ">" + v + " ";
 	}
 	adif = adif + "<eor>";
 	return adif;
@@ -139,7 +132,7 @@ function callRigCtrl(cmd) {
 // # http://localhost:8073/omnirig/qsy?freq=7200000&mode=LSB
 
 app.get('/omnirig/qsy', async function(req, res) {
-	console.log("OMNIRIG (QSY) - Received: " + toSource(req.query));
+	console.log("OMNIRIG (QSY) - Received: " + JSON.stringify(req.query));
 	var freq = parseInt(req.query.freq, 10);
 	var mode = (req.query.mode || "").toUpperCase();
 
@@ -166,7 +159,7 @@ app.get('/omnirig/qsy', async function(req, res) {
 // http://localhost:8073/log4om/log?CALL=P5DX&RST_SENT=599&RST_RCVD=599&FREQ=1.84027&BAND=160M&MODE=CW&QSO_DATE=20170515&TIME_ON=210700&STATION_CALLSIGN=AA6YQ&TX_PWR=1500
 
 app.get('/log4om/log', function(req, res) {
-	console.log("Log4OM (logging) - Received: " + toSource(req.query));
+	console.log("Log4OM (logging) - Received: " + JSON.stringify(req.query));
 
 	// the POTA award reference is optional - a QSO without one (or with a
 	// malformed one) is still logged, just without park/state info
@@ -197,7 +190,7 @@ app.get('/log4om/log', function(req, res) {
 	};
 
 	// is this element already in the buffer? 
-	console.log("BUFFER: " + toSource(dupeBuffer));
+	console.log("BUFFER: " + JSON.stringify(dupeBuffer));
 	if (isInBuffer(dupeBuffer, qso)) {
 		console.log("ignoring DUPE");
 		res.send("DUPE");
@@ -212,24 +205,13 @@ app.get('/log4om/log', function(req, res) {
 		// information and then click on the log button. 
 		var msg = "<command:3>Log<parameters:" + msgRaw.length + "> " + msgRaw;
 
-		// console.log("ADIF: " + msg);
-        // log the ADIF string to our log file
-        /*
-        fs.writeFile(logFileName, msg, {'flag' : 'a'}, function(err) {
-                if (err) { 
-                        return console.error(err);
-                }       
-        }); 
-        */
-        // 'a' flag stands for 'append'
-        const log = fs.createWriteStream(logFileName, { flags: 'a' });
-
-        // on new log entry ->
-        log.write(msg + "\n");
-
-        // you can skip closing the stream if you want it to be opened while
-        // a program runs, then file handle will be closed
-        log.end();
+		// append the plain ADIF record (without the N1MM wrapper) to the log
+		// file, so it can be imported into a logging program as-is
+		fs.appendFile(logFileName, msgRaw + "\n", function(err) {
+			if (err) {
+				console.error("log file error: " + err);
+			}
+		});
 
 		var message = Buffer.from(msg);
 		udpSocket.send(message, 0, message.length, N1MM_Port, N1MM_Addr, function(err, bytes) {
@@ -242,17 +224,17 @@ app.get('/log4om/log', function(req, res) {
 });
 
 app.get('/log4om/ping', function(req, res) {
-        console.log("Log4OM (ping - get) - query: " + toSource(req.query));
-        console.log("Log4OM (ping - get) - params: " + toSource(req.params));
-//        console.log("Log4OM (ping) - Received: " + toSource(req));
+        console.log("Log4OM (ping - get) - query: " + JSON.stringify(req.query));
+        console.log("Log4OM (ping - get) - params: " + JSON.stringify(req.params));
+//        console.log("Log4OM (ping) - Received: " + JSON.stringify(req));
 	// res.sendStatus(200);
 	res.send("PING tcp, localhost, 8073");
 });
 
 app.post('/log4om/ping', function(req, res) {
-        console.log("Log4OM (ping - post) - query: " + toSource(req.query));
-        console.log("Log4OM (ping - post) - params: " + toSource(req.params));
-//        console.log("Log4OM (ping) - Received: " + toSource(req));
+        console.log("Log4OM (ping - post) - query: " + JSON.stringify(req.query));
+        console.log("Log4OM (ping - post) - params: " + JSON.stringify(req.params));
+//        console.log("Log4OM (ping) - Received: " + JSON.stringify(req));
 	// res.sendStatus(200);
 	res.send("PING tcp, localhost, 8073");
 });
@@ -262,6 +244,6 @@ app.get('/', function(req, res) {
 	res.send(`PotaPlus Connector - Listening on port ${port}!`);
 });
 
-app.listen(port, function() {
-	console.log(`PotaPlus Connector - Listening on port ${port}!`);
+app.listen(port, bindAddr, function() {
+	console.log(`PotaPlus Connector - Listening on ${bindAddr}:${port}!`);
 });
