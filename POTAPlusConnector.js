@@ -15,9 +15,10 @@ const logFileName = "./adif.log";
 
 // for rigctl
 const port = 8073;
-const radio = "2";
-const device = "10.0.1.5:4532";
-const program = "/usr/local/bin/rigctl";
+const radio = "2045"; // Elecraft KX3
+const device = "/dev/cu.usbserial-A907UQ6P"; // KX3 serial port
+const serialSpeed = "38400"; // must match the KX3 MENU:RS232 setting
+const program = "/opt/local/bin/rigctl";
 
 // for RUMlogNG
 const N1MM_Addr = "10.0.1.255";
@@ -94,13 +95,17 @@ function makeAdifData(qso) {
 function callRigCtrl(cmd) {
 	var resp = "";
 	cmd = cmd.trim();
-	var args = "-m " + radio + " -r " + device + " " + cmd;
+	var args = "-m " + radio + " -r " + device + " -s " + serialSpeed + " " + cmd;
 	// console.log('ARGS: ' + args);
 	args = args.trim();
 
 	args = args.split(" ");
 
 	child = spawn(program, args);
+
+	child.on("error", function(e) {
+		console.log("rigctl spawn error: " + e);
+	});
 
 	child.stdout.on("data", function(data) {
 		data = data.toString("utf8");
@@ -130,11 +135,10 @@ app.get('/omnirig/qsy', function(req, res) {
 		return;
 	}
 	// console.log("Found QSY: " + freq + " " + mode);
-	callRigCtrl("F " + freq);
-
-	// sleep 250ms and execute the next call
-	timer(250);
-	callRigCtrl("M " + mode.toUpperCase() + " " + BW[mode.toUpperCase()]);
+	// set frequency and mode in a single rigctl call - two concurrent
+	// rigctl processes collide on the serial port
+	callRigCtrl("F " + freq + " M " + mode.toUpperCase() + " " + BW[mode.toUpperCase()]);
+	res.send("OK");
 });
 
 
